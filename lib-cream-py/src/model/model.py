@@ -1,9 +1,8 @@
 import os
 
 import tensorflow as tf
-from keras import Model, Input
-from keras.src import optimizers, layers
-from keras.src.saving import load_model
+from keras import Model, optimizers, layers
+from keras.saving import load_model, register_keras_serializable
 
 from logger import Logger
 from .contextual_block import ContextualBlock
@@ -12,9 +11,10 @@ from .disciminator_red import DiscriminatorRed
 from .encoder import Encoder
 
 
+@register_keras_serializable(package="DeepCreamPy")
 class InpaintModel(Model):
     def __init__(self, input_height=256, input_width=256, **kwargs):
-        super(InpaintModel, self).__init__(name="", **kwargs)
+        super(InpaintModel, self).__init__(name=kwargs.pop("name", ""), **kwargs)
         self.input_height = input_height
         self.input_width = input_width
         self.encoder = Encoder(name='G_en')
@@ -36,6 +36,14 @@ class InpaintModel(Model):
         else:
             return image_result
 
+    def get_config(self):
+        base_config = super().get_config()
+        config = {
+            "input_height": self.input_height,
+            "input_width": self.input_width,
+        }
+        return {**base_config, **config}
+
 
 class InpaintNN:
     def __init__(self, model_path: str, input_height=256, input_width=256, batch_size=1, create_model=False,
@@ -49,9 +57,19 @@ class InpaintNN:
         self.model_path = model_path
         self.create_model = create_model
         self.logger = logger
-        if not create_model:
+        if create_model:
+            self.model = self._create_model()
+        else:
             self.check_model_file()
             self.model = load_model(self.model_path)
+
+    def _create_model(self):
+        tf.keras.backend.clear_session()
+        model = InpaintModel(self.input_height, self.input_width)
+        x = tf.zeros((self.batch_size, self.input_height, self.input_width, 3), dtype=tf.float32)
+        mask = tf.ones((self.batch_size, self.input_height, self.input_width, 3), dtype=tf.float32)
+        model((x, x, mask), training=False)
+        return model
 
     def check_model_file(self):
         if not os.path.exists(self.model_path):
@@ -151,13 +169,13 @@ class InpaintNN:
         for var in self.model.variables:
             old_name = lookup_model[var.path]
             old_shape = variable_map.pop(old_name)
-            assert old_shape == var.shape
+            assert tuple(old_shape) == tuple(var.shape)
             v = reader.get_tensor(old_name)
             var.assign(v)
         for var in self.disc_red.variables:
             old_name = lookup_disc[var.path]
             old_shape = variable_map.pop(old_name)
-            assert old_shape == var.shape
+            assert tuple(old_shape) == tuple(var.shape)
             v = reader.get_tensor(old_name)
             var.assign(v)
         variable_map.pop('beta1_power')
@@ -171,16 +189,11 @@ class InpaintNN:
         self.model.save(self.model_path)
 
     def train(self, epochs: int, dataset, checkpoint_path: str):
-        X = Input(shape=(self.input_height, self.input_width, 3), batch_size=self.batch_size, dtype=tf.float32)
-        Y = Input(shape=(self.input_height, self.input_width, 3), batch_size=self.batch_size, dtype=tf.float32)
-        MASK = Input(shape=(self.input_height, self.input_width, 3), batch_size=self.batch_size, dtype=tf.float32)
-        # todo: unclear
-        IT = 0
-
-        output = InpaintModel(self.input_height, self.input_width)((X, Y, MASK))
+        model = self._create_model()
 
         # Discriminator
         disc_red = DiscriminatorRed(name='disc_red')
+        disc_red.build((None, self.input_height, self.input_width, 3))
 
         # todo never used?
         # SSIM (Structural Similarity Index)
@@ -190,18 +203,18 @@ class InpaintNN:
         # B_Y = tf.cast(B[:, :, :, 0:1] * 255.0, tf.int32)
         # ssim = tf.reduce_mean(tf.image.ssim(tf.cast(A_Y, tf.float32), tf.cast(B_Y, tf.float32), max_val=255.0))
 
-        alpha = IT / 1000000
+        global_step = tf.Variable(0, trainable=False, dtype=tf.int64)
 
         # Optimizers
         optimizer_D = optimizers.Adam(learning_rate=0.0004, beta_1=0.5,
                                       beta_2=0.9)  # .minimize(Loss_D, var_list=var_D)
         optimizer_G = optimizers.Adam(learning_rate=0.0001, beta_1=0.5,
                                       beta_2=0.9)  # .minimize(Loss_G, var_list=var_G)
-
-        model = Model(inputs=[X, Y, MASK], outputs=[output])
+        optimizer_G.build(model.trainable_variables)
+        optimizer_D.build(disc_red.trainable_variables)
 
         checkpoint = tf.train.Checkpoint(generator=model, discriminator=disc_red, optimizer_G=optimizer_G,
-                                         optimizer_D=optimizer_D)
+                                         optimizer_D=optimizer_D, global_step=global_step)
         checkpoint_manager = tf.train.CheckpointManager(checkpoint, checkpoint_path, max_to_keep=3)
 
         if checkpoint_manager.latest_checkpoint:
@@ -209,18 +222,19 @@ class InpaintNN:
             self.logger.info(f"checkpoint restored", checkpoint_manager.latest_checkpoint)
 
         @tf.function
-        def train_step(real_images, y, masks):
+        def train_step(censored_images, target_images, masks):
             with tf.GradientTape() as tape_D, tf.GradientTape() as tape_G:
-                fake_images, I_ge, I_co = model([real_images, y, masks], training=True)
+                fake_images, I_ge, I_co = model((censored_images, target_images, masks), training=True)
 
-                D_real = disc_red(real_images)
+                D_real = disc_red(target_images)
                 D_fake = disc_red(fake_images)
 
                 loss_D = tf.reduce_mean(tf.nn.relu(1 + D_fake)) + tf.reduce_mean(tf.nn.relu(1 - D_real))
                 loss_GAN = -tf.reduce_mean(D_fake)
-                loss_s_re = tf.reduce_mean(tf.abs(I_ge - real_images))
-                loss_hat = tf.reduce_mean(tf.abs(I_co - real_images))
+                loss_s_re = tf.reduce_mean(tf.abs(I_ge - target_images))
+                loss_hat = tf.reduce_mean(tf.abs(I_co - target_images))
 
+                alpha = tf.cast(global_step, tf.float32) / 1000000.0
                 loss_G = 0.1 * loss_GAN + 10 * loss_s_re + 5 * (1 - alpha) * loss_hat
 
             # Compute gradients
@@ -230,6 +244,7 @@ class InpaintNN:
             # Apply gradients
             optimizer_D.apply_gradients(zip(grads_D, disc_red.trainable_variables))
             optimizer_G.apply_gradients(zip(grads_G, model.trainable_variables))
+            global_step.assign_add(1)
 
             return loss_D, loss_G
 
@@ -246,11 +261,7 @@ class InpaintNN:
             checkpoint_manager.save()
             self.logger.info("checkpoint-saved", checkpoint_manager.latest_checkpoint)
 
-        if epochs == 0:
-            optimizer_G.build(model.trainable_variables)
-            disc_red.build((None, 256, 256, 3))
-            optimizer_D.build(disc_red.trainable_variables)
-        else:
+        if epochs != 0:
             model.save(self.model_path)
         self.model = model
 

@@ -1,12 +1,14 @@
 import tensorflow as tf
 from keras import Model
 from keras.src.layers import Activation, Conv2D
+from keras.saving import register_keras_serializable
 
 
 def reflect_pad(x, pad_size):
     return tf.pad(x, [[0, 0], [pad_size, pad_size], [pad_size, pad_size], [0, 0]], mode="REFLECT")
 
 
+@register_keras_serializable(package="DeepCreamPy")
 class Encoder(Model):
     def __init__(self, name: str, **kwargs):
         super(Encoder, self).__init__(**kwargs)

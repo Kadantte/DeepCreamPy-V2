@@ -18,12 +18,19 @@ models/bar.keras
 models/mosaic.keras
 ```
 
+The migration has now been tested in WSL Ubuntu 24.04 with TensorFlow 2.16.2 and Keras 3.15.0. The downloaded checkpoints were successfully converted into:
+
+```text
+models/bar.keras
+models/mosaic.keras
+```
+
 So there are two separate jobs:
 
 1. Convert/migrate the old TensorFlow 1 checkpoints into V2 Keras models.
 2. Rebuild the training pipeline so new bar/mosaic models can be trained from image data.
 
-The model architecture and loss are recoverable. The missing parts are dataset generation, robust training orchestration, checkpoint resume semantics, and export.
+The model architecture and loss are recoverable. Basic checkpoint migration, model reload, prediction, and a one-batch training smoke test now work. The remaining missing production pieces are dataset generation, robust training orchestration, long-run checkpoint/resume validation, and export tooling.
 
 ## Downloaded Model Inventory
 
@@ -151,7 +158,20 @@ However, `train()` is not production-ready yet.
 
 ### 1. Installable ML Environment
 
-The local bundled Python inspected here does not include TensorFlow or Keras. To actually inspect checkpoints with `tf.compat.v1.train.NewCheckpointReader`, migrate weights, or train, the project needs a real ML environment.
+The local Windows/bundled Python inspected here did not include TensorFlow or Keras. A working WSL environment was created instead, isolated inside Ubuntu:
+
+```text
+/home/usui/.venvs/deepcreampy-v2
+```
+
+Verified package versions:
+
+```text
+Python 3.12.3
+TensorFlow 2.16.2
+Keras 3.15.0
+NumPy 1.26.4
+```
 
 Recommended environment:
 
@@ -172,7 +192,15 @@ python -c "import tensorflow as tf, keras; print(tf.__version__, keras.__version
 
 The app expects `.keras` models, but the downloaded files are old checkpoints.
 
-Target commands to add:
+Current tested conversion commands:
+
+```bash
+PYTHONPATH=lib-cream-py/src python -c "from lib_cream_py import InpaintNN; m=InpaintNN('models/bar.keras', create_model=True); m.migrate_weights('models/bar/Train_775000')"
+
+PYTHONPATH=lib-cream-py/src python -c "from lib_cream_py import InpaintNN; m=InpaintNN('models/mosaic.keras', create_model=True); m.migrate_weights('models/mosaic/Train_290000')"
+```
+
+Target commands still worth adding:
 
 ```bash
 python -m lib_cream_py.tools.migrate_checkpoint ^
@@ -184,11 +212,17 @@ python -m lib_cream_py.tools.migrate_checkpoint ^
   --out models/mosaic.keras
 ```
 
-Current blocker:
+Fixed blockers:
 
-- `InpaintNN(..., create_model=True)` does not currently initialize `self.model` before `migrate_weights()` expects it.
-- `lib_cream_py.train()` accidentally creates `./temp/mosaic.keras` then calls `migrate_weights()` with the default bar checkpoint path.
-- Keras custom layers need reliable serialization registration before `.keras` export is trustworthy.
+- `InpaintNN(..., create_model=True)` now initializes and builds `self.model`.
+- Custom Keras classes are registered for `.keras` save/load.
+- Repeated model creation clears the Keras session so layer names match the checkpoint migration map.
+
+Remaining cleanup:
+
+- Add a dedicated migration CLI instead of using one-line Python commands.
+- Add automated migration tests with shape checks.
+- Update app/docs to explain TF1 checkpoint migration versus `.keras` inference models.
 
 ### 3. Dataset Generation
 
@@ -251,14 +285,14 @@ IT = 0
 alpha = IT / 1000000
 ```
 
-Needed:
+Implemented in the smoke-tested training loop:
 
 ```python
 global_step = tf.Variable(0, trainable=False, dtype=tf.int64)
 alpha = tf.cast(global_step, tf.float32) / max_iterations
 ```
 
-`global_step` must be saved/restored in checkpoints.
+`global_step` is included in the TF2 checkpoint. A longer resume test is still needed.
 
 ### 6. Optimizer State
 
@@ -268,6 +302,8 @@ The old checkpoints contain Adam slot variables. For new TF2 training:
 - Build optimizer variables before restoring.
 - Checkpoint generator, discriminator, both optimizers, and global step.
 - Test save/restore on a tiny dataset.
+
+The training smoke test now builds optimizer variables and completes one update on a dummy batch. A real save/stop/resume equivalence test is still required.
 
 ### 7. Training Command
 
@@ -325,15 +361,15 @@ flowchart TD
 
 A real training implementation should pass these milestones before any long run:
 
-- Can create one `(X, Y, MASK)` batch from clean images.
-- Can run one generator forward pass.
-- Can run one discriminator forward pass.
-- Can compute finite `Loss_D` and `Loss_G`.
-- Can apply one train step without NaNs.
-- Can save and restore checkpoint.
-- Can overfit 4 to 16 tiny samples.
-- Can export `.keras`.
-- Exported model can run the existing inference pipeline.
+- Can create one `(X, Y, MASK)` batch from clean images. Missing dataset generator.
+- Can run one generator forward pass. Verified.
+- Can run one discriminator forward pass. Verified through training smoke test.
+- Can compute finite `Loss_D` and `Loss_G`. Verified through training smoke test.
+- Can apply one train step without NaNs. Verified on a dummy batch.
+- Can save and restore checkpoint. Partially verified; resume equivalence still needed.
+- Can overfit 4 to 16 tiny samples. Not done yet.
+- Can export `.keras`. Verified.
+- Exported model can run the existing inference pipeline. Verified for migrated bar model on the included mermaid sample.
 
 ## Bottom Line
 
@@ -347,4 +383,3 @@ The old model/training recipe is recoverable from:
 - and the original PEPSI/DeepCreamPy training structure.
 
 The next best engineering move is not to start a full training run. It is to first make checkpoint migration and a one-step/tiny-overfit training loop work. Once that is green, scaling to real bar and mosaic model training becomes an infrastructure problem rather than a mystery.
-

@@ -1,6 +1,7 @@
 import tensorflow as tf
 from keras import Layer
 from keras.src.layers import Conv2D
+from keras.saving import register_keras_serializable
 
 
 def ceil(a, b):
@@ -21,6 +22,7 @@ def softmax(x):
     return exp_x / tf.reduce_sum(exp_x, axis=-1, keepdims=True)
 
 
+@register_keras_serializable(package="DeepCreamPy")
 class ContextualBlock(Layer):
     def __init__(self, k_size, lamda, stride=1, name=str, **kwargs):
         super(ContextualBlock, self).__init__(name=name, **kwargs)
@@ -34,6 +36,7 @@ class ContextualBlock(Layer):
         config = {
             "k_size": self.k_size,
             "lamda": self.lamda,
+            "stride": self.stride,
         }
         return {**base_config, **config}
 

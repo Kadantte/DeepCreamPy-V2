@@ -2,8 +2,10 @@ import tensorflow as tf
 
 from keras import Layer
 from keras.src.layers import Conv2D
+from keras.saving import register_keras_serializable
 
 
+@register_keras_serializable(package="DeepCreamPy")
 class ConvNN(Layer):
     def __init__(self, dims1, dims2, size1, size2, k_size=3, **kwargs):
         super(ConvNN, self).__init__(**kwargs)
@@ -47,6 +49,7 @@ class ConvNN(Layer):
         return x
 
 
+@register_keras_serializable(package="DeepCreamPy")
 class Decoder(Layer):
     def __init__(self, size1, size2, name: str, **kwargs):
         super(Decoder, self).__init__(name=name, **kwargs)

@@ -1,8 +1,10 @@
 import tensorflow as tf
 from keras import Layer, Model
 from keras.src.initializers import TruncatedNormal
+from keras.saving import register_keras_serializable
 
 
+@register_keras_serializable(package="DeepCreamPy")
 class SNConv2D(Layer):
     def __init__(self, output_dim, kernel_size, stride, name: str, **kwargs):
         super(SNConv2D, self).__init__(name=name, **kwargs)
@@ -58,6 +60,7 @@ class SNConv2D(Layer):
                             padding='SAME') + self.b
 
 
+@register_keras_serializable(package="DeepCreamPy")
 class DiscriminatorRed(Model):
     def __init__(self, name=str, **kwargs):
         super(DiscriminatorRed, self).__init__(name=name, **kwargs)
@@ -110,6 +113,7 @@ class DiscriminatorRed(Model):
         return x
 
 
+@register_keras_serializable(package="DeepCreamPy")
 class DenseRedSN(Layer):
     def __init__(self, name: str, **kwargs):
         super(DenseRedSN, self).__init__(name=name, **kwargs)
